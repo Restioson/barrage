@@ -1,0 +1,20 @@
+[package]
+name = "barrage"
+description = "A simple async broadcast channel"
+version = "0.1.0"
+authors = ["Restioson <restiosondev@gmail.com>"]
+edition = "2018"
+license = "Apache-2.0"
+repository = "https://github.com/Restioson/barrage"
+documentation = "https://docs.rs/barrage"
+readme = "README.md"
+keywords = ["async", "futures", "async-await", "mpmc", "channel", "broadcast"]
+categories = ["asynchronous", "concurrency"]
+
+[dependencies]
+spinning_top = "0.2.2"
+concurrent-queue = "1.2.2"
+event-listener = "2.4.0"
+
+[dev-dependencies]
+tokio = { version = "0.2", features = ["macros", "rt-threaded", "time", "blocking"] }
