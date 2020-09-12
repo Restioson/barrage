@@ -12,14 +12,17 @@ keywords = ["async", "futures", "async-await", "mpmc", "channel", "broadcast"]
 categories = ["asynchronous", "concurrency"]
 
 [dependencies]
-concurrent-queue = { path = "../concurrent-queue" }
-event-listener = { path = "../event-listener" }
+concurrent-queue = { git = "https://github.com/Restioson/concurrent-queue", branch = "loom" }
+event-listener = { git = "https://github.com/Restioson/event-listener", branch = "loom" }
 
 [target.'cfg(not(windows))'.dependencies]
 spinny = "0.2"
 
 [target.'cfg(loom)'.dependencies]
-loom = { path = "../loom", features = ["futures", "checkpoint"] }
+loom = { git = "https://github.com/Restioson/loom", features = ["futures", "checkpoint"] }
+
+[patch.crates-io]
+loom = { git = "https://github.com/Restioson/loom" }
 
 [dev-dependencies]
 tokio = { version = "0.2", features = ["macros", "rt-threaded", "time", "blocking"] }
