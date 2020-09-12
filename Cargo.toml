@@ -12,9 +12,15 @@ keywords = ["async", "futures", "async-await", "mpmc", "channel", "broadcast"]
 categories = ["asynchronous", "concurrency"]
 
 [dependencies]
-spinning_top = "0.2.2"
-concurrent-queue = "1.2.2"
-event-listener = "2.4.0"
+concurrent-queue = { path = "../concurrent-queue" }
+event-listener = { path = "../event-listener" }
+
+[target.'cfg(not(windows))'.dependencies]
+spinny = "0.2"
+
+[target.'cfg(loom)'.dependencies]
+loom = { path = "../loom", features = ["futures", "checkpoint"] }
 
 [dev-dependencies]
 tokio = { version = "0.2", features = ["macros", "rt-threaded", "time", "blocking"] }
+tokio-test = { version = "0.2" }

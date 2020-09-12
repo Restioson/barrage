@@ -1,57 +1,25 @@
-use spinning_top::{Spinlock, SpinlockGuard};
-use std::collections::VecDeque;
+mod facade;
+
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
-use std::thread;
-use std::time::Duration;
 use concurrent_queue::ConcurrentQueue;
 use event_listener::{Event, EventListener};
 use std::fmt::Debug;
 
-#[cfg(not(windows))]
-type ChannelLock<T> = Spinlock<T>;
-#[cfg(not(windows))]
-type ChannelGuard<'a, T> = SpinlockGuard<'a, T>;
+use facade::sync::atomic::{AtomicUsize, Ordering};
+use facade::sync::Arc;
+use facade::*;
 
-#[cfg(windows)]
-type ChannelLock<T> = std::sync::Mutex<T>;
-#[cfg(windows)]
-type ChannelGuard<'a, T> = std::sync::MutexGuard<'a, T>;
-
-#[cfg(not(windows))]
-fn wait_lock<T>(lock: &ChannelLock<T>) -> ChannelGuard<'_, T> {
-    let mut i = 4;
-    loop {
-        for _ in 0..10 {
-            if let Some(guard) = lock.try_lock() {
-                return guard;
-            }
-            thread::yield_now();
-        }
-        thread::sleep(Duration::from_nanos(1 << i));
-        i += 1;
-    }
-}
-
-#[cfg(windows)]
-fn wait_lock<T>(lock: &ChannelLock<T>) -> ChannelGuard<'_, T> {
-    lock.lock()
-}
-
-struct Inner<T> {
-    items: VecDeque<Arc<T>>,
-    receiver_queues: Vec<Weak<ConcurrentQueue<Arc<T>>>>,
-}
+type ReceiverQueue<T> = ConcurrentQueue<Arc<T>>;
 
 struct Shared<T> {
-    inner: ChannelLock<Inner<T>>,
+    receiver_queues: RwLock<Vec<Arc<ReceiverQueue<T>>>>,
     on_final_receive: Event,
     on_send: Event,
     n_receivers: AtomicUsize,
     n_senders: AtomicUsize,
+    len: AtomicUsize,
     capacity: Option<usize>,
 }
 
@@ -62,16 +30,24 @@ pub struct Sender<T: Clone + Unpin>(Arc<Shared<T>>);
 
 impl<T: Clone + Unpin> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.0.n_senders.fetch_add(1,Ordering::AcqRel);
+        let x = self.0.n_senders.fetch_add(1, Ordering::SeqCst); // TODO(loom)
+        println!("n_senders += 1 (now is {})", x + 1);
         Sender(self.0.clone())
     }
 }
 
 impl<T: Clone + Unpin> Drop for Sender<T> {
     fn drop(&mut self) {
-        if self.0.n_senders.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.0.on_send.notify(self.0.n_receivers.load(Ordering::Acquire));
+        println!("Tx drop");
+        if self.0.n_senders.fetch_sub(1, Ordering::SeqCst) != 1 { // TODO(loom)
+            return;
         }
+        self.0.on_send.notify(self.0.n_receivers.load(Ordering::SeqCst));
+        println!(
+            " -> Notifying {} receivers. n_senders = {}",
+            self.0.n_receivers.load(Ordering::SeqCst),
+            self.0.n_senders.load(Ordering::SeqCst)
+        );
     }
 }
 
@@ -91,35 +67,19 @@ impl<T: Clone + Unpin> Sender<T> {
         }
 
         let shared = &self.0;
-        let mut channel = wait_lock(&shared.inner);
-
-        if shared.capacity.map(|c| c == channel.items.len()).unwrap_or(false) {
+        if shared.capacity.map(|c| c == shared.len.load(Ordering::Acquire)).unwrap_or(false) {
             return Err(TrySendError::Full(item));
         }
 
         let item = Arc::new(item);
 
         // This isn't a for loop because idx is only advanced for present queues
-        let mut idx = 0;
-        while idx < channel.receiver_queues.len() {
-            let q = match channel.receiver_queues.get(idx) {
-                Some(q) => q,
-                None => break,
-            };
-
-            match q.upgrade() {
-                Some(q) => {
-                    let _ = q.push(item.clone());
-                    idx += 1;
-                }
-                None => {
-                    channel.receiver_queues.remove(idx);
-                }
-            }
+        for q in lock_read(&shared.receiver_queues).iter() {
+            assert!(q.push(item.clone()).is_ok());
         }
 
-        channel.items.push_back(item);
-        shared.on_send.notify(shared.n_receivers.load(Ordering::Acquire));
+        shared.len.fetch_add(1, Ordering::Acquire);
+        shared.on_send.notify_additional(shared.n_receivers.load(Ordering::Acquire));
 
         Ok(())
     }
@@ -182,9 +142,9 @@ pub struct Receiver<T: Clone + Unpin> {
 impl<T: Clone + Unpin> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         let queue = Arc::new(ConcurrentQueue::unbounded());
-        let mut inner = wait_lock(&self.shared.inner);
-        inner.receiver_queues.push(Arc::downgrade(&queue));
-        self.shared.n_receivers.fetch_add(1, Ordering::AcqRel);
+        let mut receiver_queues = lock_write(&self.shared.receiver_queues);
+        receiver_queues.push(queue.clone());
+        self.shared.n_receivers.fetch_add(1, Ordering::Relaxed);
 
         Receiver {
             shared: self.shared.clone(),
@@ -195,9 +155,14 @@ impl<T: Clone + Unpin> Clone for Receiver<T> {
 
 impl<T: Clone + Unpin> Drop for Receiver<T> {
     fn drop(&mut self) {
-        if self.shared.n_receivers.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.shared.on_final_receive.notify(self.shared.n_senders.load(Ordering::Acquire));
+        let mut receiver_queues = lock_write(&self.shared.receiver_queues);
+        receiver_queues.retain(|other| !Arc::ptr_eq(&self.queue, other));
+
+        if self.shared.n_receivers.fetch_sub(1, Ordering::Release) != 1 {
+            return;
         }
+
+        self.shared.on_final_receive.notify_additional(self.shared.n_senders.load(Ordering::Acquire));
     }
 }
 
@@ -216,15 +181,21 @@ impl<T: Clone + Unpin> Receiver<T> {
     pub fn try_recv(&mut self) -> Result<Option<T>, Disconnected> {
         match self.queue.pop() {
             Ok(item) => {
-                // 2 because this arc and the item queue arc
-                if Arc::strong_count(&item) == 2 {
-                    self.remove_item();
+                if Arc::strong_count(&item) == 1 {
+                    self.shared.len.fetch_sub(1, Ordering::Release);
+                    self.shared.on_final_receive.notify_additional(1);
                 }
 
                 Ok(Some((&*item).clone()))
             },
-            Err(_) if self.shared.n_senders.load(Ordering::Acquire) > 0 => Ok(None),
-            Err(_) => Err(Disconnected),
+            Err(_) if self.shared.n_senders.load(Ordering::SeqCst) > 0 => { // TODO(loom)
+                println!(" -> n_senders = {}", self.shared.n_senders.load(Ordering::SeqCst));
+                Ok(None)
+            },
+            Err(_) => {
+                println!("Disconnected");
+                Err(Disconnected)
+            },
         }
     }
 
@@ -233,12 +204,6 @@ impl<T: Clone + Unpin> Receiver<T> {
             receiver: self,
             event_listener: None,
         }
-    }
-
-    fn remove_item(&mut self) {
-        let mut inner = wait_lock(&self.shared.inner);
-        inner.items.pop_front();
-        self.shared.on_final_receive.notify(1);
     }
 }
 
@@ -251,15 +216,23 @@ impl<'a, T: Clone + Unpin> Future for RecvFut<'a, T> {
     type Output = Result<T, Disconnected>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        println!("Rx poll");
+        let mut listener = self.receiver.shared.on_send.listen();
         match self.receiver.try_recv() {
-            Ok(Some(item)) => Poll::Ready(Ok(item)),
+            Ok(Some(item)) => {
+                println!(" -> got item");
+                Poll::Ready(Ok(item))
+            },
             Ok(None) => {
-                let mut listener = self.receiver.shared.on_send.listen();
-                assert_eq!(Pin::new(&mut listener).poll(cx), Poll::Pending);
+                println!(" -> waiting");
+                println!(" -> poll is pending: {}", Pin::new(&mut listener).poll(cx).is_pending());
                 self.event_listener = Some(listener);
                 Poll::Pending
             },
-            Err(_) => Poll::Ready(Err(Disconnected)),
+            Err(_) => {
+                println!(" -> disconnected");
+                Poll::Ready(Err(Disconnected))
+            },
         }
     }
 }
@@ -267,17 +240,13 @@ impl<'a, T: Clone + Unpin> Future for RecvFut<'a, T> {
 pub fn new<T: Clone + Unpin>(capacity: Option<usize>) -> (Sender<T>, Receiver<T>) {
     let receiver_queue = Arc::new(ConcurrentQueue::unbounded());
 
-    let inner = Inner {
-        items: VecDeque::new(),
-        receiver_queues: vec![Arc::downgrade(&receiver_queue)],
-    };
-
     let shared = Shared {
-        inner: ChannelLock::new(inner),
+        receiver_queues: RwLock::new(vec![receiver_queue.clone()]),
         on_final_receive: Event::new(),
         on_send: Event::new(),
         n_receivers: AtomicUsize::new(1),
         n_senders: AtomicUsize::new(1),
+        len: AtomicUsize::new(0),
         capacity,
     };
     let shared = Arc::new(shared);

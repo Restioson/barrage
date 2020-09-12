@@ -1,8 +1,13 @@
+#![cfg(not(loom))]
+
 use barrage::{Disconnected, SendError};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::time::Duration;
+use std::sync::Arc;
+use std::thread;
+use tokio_test::assert_ok;
 
 struct PollOnce<'a, F: Future + Unpin>(&'a mut F);
 
@@ -150,4 +155,74 @@ async fn no_reorder() {
     for task in handles {
         task.await.unwrap();
     }
+}
+
+// -- Tests from loom.rs adapted to run without loom --
+
+#[test]
+fn broadcast_send_threaded() {
+    let (tx1, mut rx) = barrage::bounded(2);
+    let tx1 = Arc::new(tx1);
+    let tx2 = tx1.clone();
+
+    let th1 = thread::spawn(move || {
+        assert_ok!(tx1.send("one"));
+        assert_ok!(tx1.send("two"));
+        assert_ok!(tx1.send("three"));
+    });
+
+    let th2 = thread::spawn(move || {
+        tokio_test::block_on(async {
+            assert_ok!(tx2.send_async("inye").await);
+            assert_ok!(tx2.send_async("zimbini").await);
+            assert_ok!(tx2.send_async("zintathu").await);
+        });
+    });
+
+    tokio_test::block_on(async {
+        let mut num: usize = 0;
+        loop {
+            match rx.recv_async().await {
+                Ok(_) => num += 1,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(num, 6);
+    });
+
+    assert_ok!(th1.join());
+    assert_ok!(th2.join());
+}
+
+#[test]
+fn drop_rx() {
+    let (tx, mut rx1) = barrage::bounded(16);
+    let rx2 = rx1.clone();
+
+    let th1 = thread::spawn(move || {
+        tokio_test::block_on(async {
+            let v = assert_ok!(rx1.recv_async().await);
+            assert_eq!(v, "one");
+
+            let v = assert_ok!(rx1.recv_async().await);
+            assert_eq!(v, "two");
+
+            let v = assert_ok!(rx1.recv_async().await);
+            assert_eq!(v, "three");
+
+            assert!(rx1.recv_async().await.is_err());
+        });
+    });
+
+    let th2 = thread::spawn(move || {
+        drop(rx2);
+    });
+
+    assert_ok!(tx.send("one"));
+    assert_ok!(tx.send("two"));
+    assert_ok!(tx.send("three"));
+    drop(tx);
+
+    assert_ok!(th1.join());
+    assert_ok!(th2.join());
 }
