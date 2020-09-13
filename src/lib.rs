@@ -1,4 +1,19 @@
-mod facade;
+//! Barrage - an asynchronous broadcast channel. Each message sent will be received by every receiver.
+//! When the channel reaches its cap, send operations will block, wait, or fail (depending on which
+//! type of send was chosen). Cloned receivers will only receive messages sent after they are cloned.
+//!
+//! # Example
+//!
+//! ```rust
+//!
+//! let (tx, mut rx1) = barrage::unbounded();
+//! let mut rx2 = rx1.clone();
+//! tx.send("Hello!");
+//! let mut rx3 = rx1.clone();
+//! assert_eq!(rx1.recv(), Ok("Hello!"));
+//! assert_eq!(rx2.recv(), Ok("Hello!"));
+//! assert_eq!(rx3.try_recv(), Ok(None));
+//! ```
 
 use std::future::Future;
 use std::pin::Pin;
@@ -6,10 +21,11 @@ use std::task::{Context, Poll};
 use concurrent_queue::ConcurrentQueue;
 use event_listener::{Event, EventListener};
 use std::fmt::Debug;
-
 use facade::sync::atomic::{AtomicUsize, Ordering};
 use facade::sync::Arc;
 use facade::*;
+
+mod facade;
 
 type ReceiverQueue<T> = ConcurrentQueue<Arc<T>>;
 
@@ -23,9 +39,11 @@ struct Shared<T> {
     capacity: Option<usize>,
 }
 
+/// All senders have disconnected from the channel and there are no more messages waiting.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct Disconnected;
 
+/// The broadcaster side of the channel.
 pub struct Sender<T: Clone + Unpin>(Arc<Shared<T>>);
 
 impl<T: Clone + Unpin> Clone for Sender<T> {
@@ -55,6 +73,7 @@ pub enum TrySendError<T> {
 pub struct SendError<T>(pub T);
 
 impl<T: Clone + Unpin> Sender<T> {
+    /// Try to broadcast a message to all receivers. If the message cap is reached, this will fail.
     pub fn try_send(&self, item: T) -> Result<(), TrySendError<T>> {
         if self.0.n_receivers.load(Ordering::Acquire) == 0 {
             return Err(TrySendError::Disconnected(item));
@@ -78,6 +97,8 @@ impl<T: Clone + Unpin> Sender<T> {
         Ok(())
     }
 
+    /// Broadcast a message to all receivers. If the message cap is reached, this will block until
+    /// the queue is no longer full.
     pub fn send(&self, mut item: T) -> Result<(), SendError<T>> {
         loop {
             let event_listener = self.0.on_final_receive.listen();
@@ -92,6 +113,8 @@ impl<T: Clone + Unpin> Sender<T> {
         }
     }
 
+    /// Broadcast a message to all receivers. If the message cap is reached, this will
+    /// asynchronously wait until the queue is no longer full.
     pub fn send_async(&self, item: T) -> SendFut<T> {
         SendFut {
             item: Some(item),
@@ -101,6 +124,8 @@ impl<T: Clone + Unpin> Sender<T> {
     }
 }
 
+/// The future representing an asynchronous broadcast operation.
+///
 /// # Panics
 ///
 /// This will panic if polled after returning `Poll::Ready`.
@@ -137,6 +162,7 @@ impl<'a, T: Clone + Unpin> Future for SendFut<'a, T> {
     }
 }
 
+/// The receiver side of the channel. This will receive every message broadcast.
 pub struct Receiver<T: Clone + Unpin> {
     shared: Arc<Shared<T>>,
     queue: Arc<ConcurrentQueue<Arc<T>>>,
@@ -170,6 +196,8 @@ impl<T: Clone + Unpin> Drop for Receiver<T> {
 }
 
 impl<T: Clone + Unpin> Receiver<T> {
+    /// Receive a broadcast message. If there are none in the queue, it will block until another is
+    /// sent or all senders disconnect.
     pub fn recv(&mut self) -> Result<T, Disconnected> {
         loop {
             let listener = self.shared.on_send.listen();
@@ -181,6 +209,8 @@ impl<T: Clone + Unpin> Receiver<T> {
         }
     }
 
+    /// Try to receive a broadcast message. If there are none in the queue, it will return `None`, or
+    /// if there are no senders it will return `Disconnected`.
     pub fn try_recv(&mut self) -> Result<Option<T>, Disconnected> {
         match self.queue.pop() {
             Ok(item) => {
@@ -196,6 +226,8 @@ impl<T: Clone + Unpin> Receiver<T> {
         }
     }
 
+    /// Receive a broadcast message. If there are none in the queue, it will asynchronously wait
+    /// until another is sent or all senders disconnect.
     pub fn recv_async(&mut self) -> RecvFut<T> {
         RecvFut {
             receiver: self,
@@ -204,6 +236,7 @@ impl<T: Clone + Unpin> Receiver<T> {
     }
 }
 
+/// The future representing an asynchronous receive operation.
 pub struct RecvFut<'a, T: Clone + Unpin> {
     receiver: &'a mut Receiver<T>,
     event_listener: Option<EventListener>,
@@ -230,6 +263,7 @@ impl<'a, T: Clone + Unpin> Future for RecvFut<'a, T> {
     }
 }
 
+/// Create a new channel with the given capacity. If `None` is passed, it will be unbounded.
 pub fn new<T: Clone + Unpin>(capacity: Option<usize>) -> (Sender<T>, Receiver<T>) {
     let receiver_queue = Arc::new(ConcurrentQueue::unbounded());
 
@@ -247,10 +281,12 @@ pub fn new<T: Clone + Unpin>(capacity: Option<usize>) -> (Sender<T>, Receiver<T>
     (Sender(shared.clone()), Receiver { shared, queue: receiver_queue })
 }
 
+/// Create a bounded channel of the given capacity.
 pub fn bounded<T: Clone + Unpin>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     new(Some(capacity))
 }
 
+/// Create an unbounded channel.
 pub fn unbounded<T: Clone + Unpin>() -> (Sender<T>, Receiver<T>) {
     new(None)
 }
