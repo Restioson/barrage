@@ -30,24 +30,18 @@ pub struct Sender<T: Clone + Unpin>(Arc<Shared<T>>);
 
 impl<T: Clone + Unpin> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        let x = self.0.n_senders.fetch_add(1, Ordering::SeqCst); // TODO(loom)
-        println!("n_senders += 1 (now is {})", x + 1);
+        self.0.n_senders.fetch_add(1, Ordering::Relaxed);
         Sender(self.0.clone())
     }
 }
 
 impl<T: Clone + Unpin> Drop for Sender<T> {
     fn drop(&mut self) {
-        println!("Tx drop");
-        if self.0.n_senders.fetch_sub(1, Ordering::SeqCst) != 1 { // TODO(loom)
+        if self.0.n_senders.fetch_sub(1, Ordering::Release) != 1 {
             return;
         }
-        self.0.on_send.notify(self.0.n_receivers.load(Ordering::SeqCst));
-        println!(
-            " -> Notifying {} receivers. n_senders = {}",
-            self.0.n_receivers.load(Ordering::SeqCst),
-            self.0.n_senders.load(Ordering::SeqCst)
-        );
+
+        self.0.on_send.notify(self.0.n_receivers.load(Ordering::Acquire));
     }
 }
 
@@ -78,7 +72,7 @@ impl<T: Clone + Unpin> Sender<T> {
             assert!(q.push(item.clone()).is_ok());
         }
 
-        shared.len.fetch_add(1, Ordering::Acquire);
+        shared.len.fetch_add(1, Ordering::Release);
         shared.on_send.notify(shared.n_receivers.load(Ordering::Acquire));
 
         Ok(())
@@ -120,22 +114,16 @@ impl<'a, T: Clone + Unpin> Future for SendFut<'a, T> {
     type Output = Result<(), SendError<T>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        println!("Send poll");
         let poll = loop {
             let item = self.item.take().expect("cannot poll completed send future");
             let mut listener = self.sender.0.on_final_receive.listen();
             break match self.sender.try_send(item) {
-                Ok(()) => {
-                    println!(" -> sent");
-                    Poll::Ready(Ok(()))
-                },
+                Ok(()) => Poll::Ready(Ok(())),
                 Err(TrySendError::Disconnected(item)) => Poll::Ready(Err(SendError(item))),
                 Err(TrySendError::Full(ret)) => {
-                    println!(" -> full");
                     self.item.replace(ret);
 
                     if let Poll::Ready(_) = Pin::new(&mut listener).poll(cx) {
-                        println!(" -> poll was ready - restarting");
                         continue;
                     }
 
@@ -159,7 +147,7 @@ impl<T: Clone + Unpin> Clone for Receiver<T> {
         let queue = Arc::new(ConcurrentQueue::unbounded());
         let mut receiver_queues = lock_write(&self.shared.receiver_queues);
         receiver_queues.push(queue.clone());
-        self.shared.n_receivers.fetch_add(1, Ordering::Relaxed);
+        self.shared.n_receivers.fetch_add(1, Ordering::Release);
 
         Receiver {
             shared: self.shared.clone(),
@@ -203,14 +191,8 @@ impl<T: Clone + Unpin> Receiver<T> {
 
                 Ok(Some((&*item).clone()))
             },
-            Err(_) if self.shared.n_senders.load(Ordering::SeqCst) > 0 => { // TODO(loom)
-                println!(" -> n_senders = {}", self.shared.n_senders.load(Ordering::SeqCst));
-                Ok(None)
-            },
-            Err(_) => {
-                println!("Disconnected");
-                Err(Disconnected)
-            },
+            Err(_) if self.shared.n_senders.load(Ordering::Acquire) > 0 => Ok(None),
+            Err(_) => Err(Disconnected),
         }
     }
 
@@ -231,26 +213,18 @@ impl<'a, T: Clone + Unpin> Future for RecvFut<'a, T> {
     type Output = Result<T, Disconnected>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        println!("Rx poll");
         loop {
             let mut listener = self.receiver.shared.on_send.listen();
             break match self.receiver.try_recv() {
-                Ok(Some(item)) => {
-                    println!(" -> got item");
-                    Poll::Ready(Ok(item))
-                },
+                Ok(Some(item)) => Poll::Ready(Ok(item)),
                 Ok(None) => {
-                    println!(" -> waiting");
                     if let Poll::Ready(_) = Pin::new(&mut listener).poll(cx) {
                         continue;
                     }
                     self.event_listener = Some(listener);
                     Poll::Pending
                 },
-                Err(_) => {
-                    println!(" -> disconnected");
-                    Poll::Ready(Err(Disconnected))
-                },
+                Err(_) => Poll::Ready(Err(Disconnected)),
             }
         }
     }

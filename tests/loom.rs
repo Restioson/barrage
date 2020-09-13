@@ -1,4 +1,6 @@
+// TODO these do not work. Upstream changes to loom need to happen first.
 #![cfg(loom)]
+
 //! Adapted from https://github.com/tokio-rs/tokio/blob/master/tokio/src/sync/mod.rs.
 //! Thank you Tokio team <3
 
