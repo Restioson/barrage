@@ -6,10 +6,10 @@
 //!
 //! ```rust
 //!
-//! let (tx, mut rx1) = barrage::unbounded();
-//! let mut rx2 = rx1.clone();
+//! let (tx, rx1) = barrage::unbounded();
+//! let rx2 = rx1.clone();
 //! tx.send("Hello!");
-//! let mut rx3 = rx1.clone();
+//! let rx3 = rx1.clone();
 //! assert_eq!(rx1.recv(), Ok("Hello!"));
 //! assert_eq!(rx2.recv(), Ok("Hello!"));
 //! assert_eq!(rx3.try_recv(), Ok(None));
@@ -59,7 +59,7 @@ impl<T: Clone + Unpin> Drop for Sender<T> {
             return;
         }
 
-        self.0.on_send.notify(self.0.n_receivers.load(Ordering::Acquire));
+        self.0.on_send.notify(usize::MAX);
     }
 }
 
@@ -92,7 +92,7 @@ impl<T: Clone + Unpin> Sender<T> {
         }
 
         shared.len.fetch_add(1, Ordering::Release);
-        shared.on_send.notify(shared.n_receivers.load(Ordering::Acquire));
+        shared.on_send.notify(usize::MAX);
 
         Ok(())
     }
@@ -163,6 +163,9 @@ impl<'a, T: Clone + Unpin> Future for SendFut<'a, T> {
 }
 
 /// The receiver side of the channel. This will receive every message broadcast.
+///
+/// If receive is called twice on the same receiver, only one receive will receive the broadcast
+/// message. If both must receive it, clone the receiver.
 pub struct Receiver<T: Clone + Unpin> {
     shared: Arc<Shared<T>>,
     queue: Arc<ConcurrentQueue<Arc<T>>>,
@@ -198,7 +201,7 @@ impl<T: Clone + Unpin> Drop for Receiver<T> {
 impl<T: Clone + Unpin> Receiver<T> {
     /// Receive a broadcast message. If there are none in the queue, it will block until another is
     /// sent or all senders disconnect.
-    pub fn recv(&mut self) -> Result<T, Disconnected> {
+    pub fn recv(&self) -> Result<T, Disconnected> {
         loop {
             let listener = self.shared.on_send.listen();
             match self.try_recv() {
@@ -211,7 +214,7 @@ impl<T: Clone + Unpin> Receiver<T> {
 
     /// Try to receive a broadcast message. If there are none in the queue, it will return `None`, or
     /// if there are no senders it will return `Disconnected`.
-    pub fn try_recv(&mut self) -> Result<Option<T>, Disconnected> {
+    pub fn try_recv(&self) -> Result<Option<T>, Disconnected> {
         match self.queue.pop() {
             Ok(item) => {
                 if Arc::strong_count(&item) == 1 {
@@ -228,7 +231,7 @@ impl<T: Clone + Unpin> Receiver<T> {
 
     /// Receive a broadcast message. If there are none in the queue, it will asynchronously wait
     /// until another is sent or all senders disconnect.
-    pub fn recv_async(&mut self) -> RecvFut<T> {
+    pub fn recv_async(&self) -> RecvFut<T> {
         RecvFut {
             receiver: self,
             event_listener: None,
@@ -238,7 +241,7 @@ impl<T: Clone + Unpin> Receiver<T> {
 
 /// The future representing an asynchronous receive operation.
 pub struct RecvFut<'a, T: Clone + Unpin> {
-    receiver: &'a mut Receiver<T>,
+    receiver: &'a Receiver<T>,
     event_listener: Option<EventListener>,
 }
 

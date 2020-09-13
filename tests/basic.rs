@@ -8,6 +8,7 @@ use tokio::time::Duration;
 use std::sync::Arc;
 use std::thread;
 use tokio_test::assert_ok;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 struct PollOnce<'a, F: Future + Unpin>(&'a mut F);
 
@@ -21,16 +22,45 @@ impl<'a, F: Future + Unpin> Future for PollOnce<'a, F> {
 
 #[tokio::test]
 async fn one_message_unbounded() {
-    let (tx, mut rx) = barrage::new(None);
-    let mut rx2 = rx.clone();
+    let (tx, rx) = barrage::new(None);
+    let rx2 = rx.clone();
     tx.send_async("Hello!").await.unwrap();
     assert_eq!(rx.recv_async().await, Ok("Hello!"));
     assert_eq!(rx2.recv_async().await, Ok("Hello!"));
 }
 
+#[test]
+fn shared_recv() {
+    let (tx, rx) = barrage::new(None);
+    let mut fut1 = rx.recv_async();
+    let mut fut2 = rx.recv_async();
+    let pin1 = Pin::new(&mut fut1);
+    let pin2 = Pin::new(&mut fut2);
+
+    let woken1 = Arc::new(AtomicBool::new(false));
+    let woken2 = Arc::new(AtomicBool::new(false));
+    let woken1_clone = woken1.clone();
+    let woken2_clone = woken2.clone();
+
+    let waker = waker_fn::waker_fn(move || woken1_clone.store(true, Ordering::SeqCst));
+    let waker2 = waker_fn::waker_fn(move || woken2_clone.store(true, Ordering::SeqCst));
+    assert!(pin1.poll(&mut Context::from_waker(&waker)).is_pending());
+    assert!(pin2.poll(&mut Context::from_waker(&waker2)).is_pending());
+
+    tx.send("Hello!").unwrap();
+
+    assert!(woken1.load(Ordering::SeqCst));
+    assert!(woken2.load(Ordering::SeqCst));
+
+    let pin1 = Pin::new(&mut fut1);
+    let pin2 = Pin::new(&mut fut2);
+    assert!(pin1.poll(&mut Context::from_waker(&waker)).is_ready());
+    assert!(pin2.poll(&mut Context::from_waker(&waker2)).is_pending());
+}
+
 #[tokio::test]
 async fn sync_receive_from_wait_async_send() {
-    let (tx, mut rx) = barrage::new(None);
+    let (tx, rx) = barrage::new(None);
 
     let handle = tokio::task::spawn_blocking(move || {
         assert_eq!("Hello!", rx.recv().unwrap());
@@ -43,7 +73,7 @@ async fn sync_receive_from_wait_async_send() {
 
 #[tokio::test]
 async fn sync_receive_from_wait_try_send() {
-    let (tx, mut rx) = barrage::new(None);
+    let (tx, rx) = barrage::new(None);
 
     let handle = tokio::task::spawn_blocking(move || {
         assert_eq!("Hello!", rx.recv().unwrap());
@@ -56,7 +86,7 @@ async fn sync_receive_from_wait_try_send() {
 
 #[tokio::test]
 async fn sync_receive() {
-    let (tx, mut rx) = barrage::new(None);
+    let (tx, rx) = barrage::new(None);
 
     tx.send_async("Hello!").await.unwrap();
     assert_eq!("Hello!", rx.recv().unwrap());
@@ -64,9 +94,9 @@ async fn sync_receive() {
 
 #[tokio::test]
 async fn new_recv_after_send() {
-    let (tx, mut rx) = barrage::new(None);
+    let (tx, rx) = barrage::new(None);
     tx.send_async("Hello!").await.unwrap();
-    let mut rx2 = rx.clone();
+    let rx2 = rx.clone();
     tx.send_async("Hello 2!").await.unwrap();
     assert_eq!(rx.recv_async().await, Ok("Hello!"));
     assert_eq!(rx2.recv_async().await, Ok("Hello 2!"));
@@ -74,10 +104,10 @@ async fn new_recv_after_send() {
 
 #[tokio::test]
 async fn tx_drop_disconnect() {
-    let (tx, mut rx) = barrage::new(None);
+    let (tx, rx) = barrage::new(None);
     tx.send_async("Hello!").await.unwrap();
     drop(tx);
-    let mut rx2 = rx.clone();
+    let rx2 = rx.clone();
     assert_eq!(rx2.recv_async().await, Err(Disconnected));
     assert_eq!(rx2.recv_async().await, Err(Disconnected));
     assert_eq!(rx.recv_async().await, Ok("Hello!"));
@@ -97,7 +127,7 @@ async fn rx_drop_disconnect() {
 
 #[tokio::test]
 async fn bounded_wait_resume() {
-    let (tx, mut rx) = barrage::new(Some(1));
+    let (tx, rx) = barrage::new(Some(1));
     tx.send_async("Hello!").await.unwrap();
     let mut fut = tx.send_async("Hello!");
     assert_eq!(PollOnce(&mut fut).await, Poll::Pending);
@@ -107,7 +137,7 @@ async fn bounded_wait_resume() {
 
 #[tokio::test]
 async fn try_send_bounded_wait_resume() {
-    let (tx, mut rx) = barrage::new(Some(1));
+    let (tx, rx) = barrage::new(Some(1));
     tx.try_send("Hello!").unwrap();
     let mut fut = tx.send_async("Hello!");
     assert_eq!(PollOnce(&mut fut).await, Poll::Pending);
@@ -117,7 +147,7 @@ async fn try_send_bounded_wait_resume() {
 
 #[tokio::test]
 async fn sync_send_bounded_wait_resume() {
-    let (tx, mut rx) = barrage::new(Some(1));
+    let (tx, rx) = barrage::new(Some(1));
     tx.send("Hello!").unwrap();
     let mut fut = tx.send_async("Hello!");
     assert_eq!(PollOnce(&mut fut).await, Poll::Pending);
@@ -132,7 +162,7 @@ async fn no_reorder() {
     let mut handles = Vec::new();
 
     for _ in 0..4 {
-        let mut rx = rx.clone();
+        let rx = rx.clone();
         let mut cur = 0;
 
         let task = tokio::spawn(async move {
@@ -161,7 +191,7 @@ async fn no_reorder() {
 
 #[test]
 fn broadcast_send_threaded() {
-    let (tx1, mut rx) = barrage::bounded(2);
+    let (tx1, rx) = barrage::bounded(2);
     let tx1 = Arc::new(tx1);
     let tx2 = tx1.clone();
 
@@ -196,7 +226,7 @@ fn broadcast_send_threaded() {
 
 #[test]
 fn drop_rx() {
-    let (tx, mut rx1) = barrage::bounded(16);
+    let (tx, rx1) = barrage::bounded(16);
     let rx2 = rx1.clone();
 
     let th1 = thread::spawn(move || {

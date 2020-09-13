@@ -8,8 +8,8 @@ synchronously.
 ```rust
 #[tokio::main]
 async fn main() {
-    let (tx, mut rx) = barrage::unbounded();
-    let mut rx2 = rx.clone();
+    let (tx, rx) = barrage::unbounded();
+    let rx2 = rx.clone();
     tx.send_async("Hello!").await.unwrap();
     assert_eq!(rx.recv_async().await, Ok("Hello!"));
     assert_eq!(rx2.recv_async().await, Ok("Hello!"));

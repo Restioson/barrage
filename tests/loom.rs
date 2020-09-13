@@ -12,7 +12,7 @@ use tokio_test::assert_ok;
 #[test]
 fn broadcast_send() {
     loom::model(|| {
-        let (tx1, mut rx) = barrage::bounded(2);
+        let (tx1, rx) = barrage::bounded(2);
         let tx1 = Arc::new(tx1);
         let tx2 = tx1.clone();
 
@@ -48,8 +48,8 @@ fn broadcast_send() {
 #[test]
 fn broadcast_two() {
     loom::model(|| {
-        let (tx, mut rx1) = barrage::bounded::<Arc<&'static str>>(16);
-        let mut rx2 = rx1.clone();
+        let (tx, rx1) = barrage::bounded::<Arc<&'static str>>(16);
+        let rx2 = rx1.clone();
 
         let th1 = thread::spawn(move || {
             block_on(async {
@@ -87,7 +87,7 @@ fn broadcast_two() {
 #[test]
 fn drop_tx_rx() {
     loom::model(|| {
-        let (tx, mut rx1) = barrage::bounded(16);
+        let (tx, rx1) = barrage::bounded(16);
         let rx2 = rx1.clone();
 
         let th1 = thread::spawn(move || {
