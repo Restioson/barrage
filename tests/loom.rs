@@ -7,7 +7,7 @@ use loom::sync::Arc;
 use loom::thread;
 use tokio_test::assert_ok;
 
-//#[test]
+#[test]
 fn broadcast_send() {
     loom::model(|| {
         let (tx1, mut rx) = barrage::bounded(2);
@@ -43,8 +43,7 @@ fn broadcast_send() {
 }
 
 // An `Arc` is used as the value in order to detect memory leaks.
-// TODO(sigill)
-//#[test]
+#[test]
 fn broadcast_two() {
     loom::model(|| {
         let (tx, mut rx1) = barrage::bounded::<Arc<&'static str>>(16);
@@ -104,9 +103,9 @@ fn drop_tx_rx() {
             });
         });
 
-        // let th2 = thread::spawn(move || {
-        //     drop(rx2);
-        // });
+        let th2 = thread::spawn(move || {
+            drop(rx2);
+        });
 
         assert_ok!(block_on(tx.send_async("one")));
         assert_ok!(block_on(tx.send_async("two")));
@@ -114,17 +113,6 @@ fn drop_tx_rx() {
         drop(tx);
 
         assert_ok!(th1.join());
-        // assert_ok!(th2.join());
+        assert_ok!(th2.join());
     });
-}
-
-//#[test]
-fn a() {
-    loom::model(|| {
-        let arc = Arc::new(());
-        let arc2 = arc.clone();
-        let th1 = thread::spawn(move || drop(arc2));
-        drop(arc);
-        assert_ok!(th1.join());
-    })
 }

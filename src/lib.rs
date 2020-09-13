@@ -79,7 +79,7 @@ impl<T: Clone + Unpin> Sender<T> {
         }
 
         shared.len.fetch_add(1, Ordering::Acquire);
-        shared.on_send.notify_additional(shared.n_receivers.load(Ordering::Acquire));
+        shared.on_send.notify(shared.n_receivers.load(Ordering::Acquire));
 
         Ok(())
     }
@@ -120,17 +120,32 @@ impl<'a, T: Clone + Unpin> Future for SendFut<'a, T> {
     type Output = Result<(), SendError<T>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.sender.try_send(self.item.take().expect("send future is finished")) {
-            Ok(()) => Poll::Ready(Ok(())),
-            Err(TrySendError::Disconnected(item)) => Poll::Ready(Err(SendError(item))),
-            Err(TrySendError::Full(ret)) => {
-                let mut listener = self.sender.0.on_final_receive.listen();
-                assert_eq!(Pin::new(&mut listener).poll(cx), Poll::Pending);
-                self.event_listener = Some(listener);
-                self.item.replace(ret);
-                Poll::Pending
+        println!("Send poll");
+        let poll = loop {
+            let item = self.item.take().expect("cannot poll completed send future");
+            let mut listener = self.sender.0.on_final_receive.listen();
+            break match self.sender.try_send(item) {
+                Ok(()) => {
+                    println!(" -> sent");
+                    Poll::Ready(Ok(()))
+                },
+                Err(TrySendError::Disconnected(item)) => Poll::Ready(Err(SendError(item))),
+                Err(TrySendError::Full(ret)) => {
+                    println!(" -> full");
+                    self.item.replace(ret);
+
+                    if let Poll::Ready(_) = Pin::new(&mut listener).poll(cx) {
+                        println!(" -> poll was ready - restarting");
+                        continue;
+                    }
+
+                    self.event_listener = Some(listener);
+                    Poll::Pending
+                }
             }
-        }
+        };
+
+        poll
     }
 }
 
@@ -162,7 +177,7 @@ impl<T: Clone + Unpin> Drop for Receiver<T> {
             return;
         }
 
-        self.shared.on_final_receive.notify_additional(self.shared.n_senders.load(Ordering::Acquire));
+        self.shared.on_final_receive.notify(self.shared.n_senders.load(Ordering::Acquire));
     }
 }
 
@@ -217,22 +232,26 @@ impl<'a, T: Clone + Unpin> Future for RecvFut<'a, T> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         println!("Rx poll");
-        let mut listener = self.receiver.shared.on_send.listen();
-        match self.receiver.try_recv() {
-            Ok(Some(item)) => {
-                println!(" -> got item");
-                Poll::Ready(Ok(item))
-            },
-            Ok(None) => {
-                println!(" -> waiting");
-                println!(" -> poll is pending: {}", Pin::new(&mut listener).poll(cx).is_pending());
-                self.event_listener = Some(listener);
-                Poll::Pending
-            },
-            Err(_) => {
-                println!(" -> disconnected");
-                Poll::Ready(Err(Disconnected))
-            },
+        loop {
+            let mut listener = self.receiver.shared.on_send.listen();
+            break match self.receiver.try_recv() {
+                Ok(Some(item)) => {
+                    println!(" -> got item");
+                    Poll::Ready(Ok(item))
+                },
+                Ok(None) => {
+                    println!(" -> waiting");
+                    if let Poll::Ready(_) = Pin::new(&mut listener).poll(cx) {
+                        continue;
+                    }
+                    self.event_listener = Some(listener);
+                    Poll::Pending
+                },
+                Err(_) => {
+                    println!(" -> disconnected");
+                    Poll::Ready(Err(Disconnected))
+                },
+            }
         }
     }
 }

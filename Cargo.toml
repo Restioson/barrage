@@ -13,7 +13,8 @@ categories = ["asynchronous", "concurrency"]
 
 [dependencies]
 concurrent-queue = { git = "https://github.com/Restioson/concurrent-queue", branch = "loom" }
-event-listener = { git = "https://github.com/Restioson/event-listener", branch = "loom" }
+#event-listener = { git = "https://github.com/Restioson/event-listener", branch = "loom" }
+event-listener = { path = "../event-listener" }
 
 [target.'cfg(not(windows))'.dependencies]
 spinny = "0.2"
