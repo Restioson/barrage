@@ -81,10 +81,10 @@ pub fn lock_read<T>(lock: &RwLock<T>) -> ReadGuard<'_, T> {
 
 #[cfg(windows)]
 pub fn lock_write<T>(lock: &RwLock<T>) -> WriteGuard<'_, T> {
-    lock.lock().unwrap()
+    lock.write().unwrap()
 }
 
 #[cfg(windows)]
 pub fn lock_read<T>(lock: &RwLock<T>) -> ReadGuard<'_, T> {
-    lock.lock().unwrap()
+    lock.read().unwrap()
 }
