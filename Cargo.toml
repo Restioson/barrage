@@ -8,7 +8,7 @@ license = "Apache-2.0"
 repository = "https://github.com/Restioson/barrage"
 documentation = "https://docs.rs/barrage"
 readme = "README.md"
-keywords = ["async", "futures", "async-await", "mpmc", "channel", "broadcast"]
+keywords = ["async", "futures", "mpmc", "channel", "broadcast"]
 categories = ["asynchronous", "concurrency"]
 
 [dependencies]
