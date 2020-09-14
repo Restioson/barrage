@@ -299,3 +299,14 @@ fn shared_receiver_drop() {
 
     assert!(tx.try_send("Hello3!").is_err());
 }
+
+#[test]
+fn shared_receiver_upgrade() {
+    let (tx, rx) = barrage::unbounded();
+    let shared1 = rx.into_shared();
+    let rx2 = shared1.clone().upgrade();
+
+    tx.try_send("Hello!").unwrap();
+    assert_eq!(shared1.try_recv(), Ok(Some("Hello!")));
+    assert_eq!(rx2.try_recv(), Ok(Some("Hello!")));
+}

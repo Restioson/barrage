@@ -284,6 +284,22 @@ impl<T: Clone + Unpin> Clone for SharedReceiver<T> {
 }
 
 impl<T: Clone + Unpin> SharedReceiver<T> {
+    /// Upgrades this shared receiver into a full receiver with its own mailbox
+    pub fn upgrade(mut self) -> Receiver<T> {
+        // Duplicated clone logic to avoid dropping receiver again
+        let queue = Arc::new(ConcurrentQueue::unbounded());
+
+        {
+            let mut receiver_queues = lock_write(&self.0.shared.receiver_queues);
+            receiver_queues.push(queue.clone());
+        }
+
+        self.0.shared.n_receivers.fetch_add(1, Ordering::Release);
+        self.0.queue = queue;
+
+        Receiver(self.0)
+    }
+
     /// Checks whether this shared receiver shares a mailbox with another.
     pub fn same_mailbox(&self, other: &SharedReceiver<T>) -> bool {
         Arc::ptr_eq(&self.0.queue, &other.0.queue)
