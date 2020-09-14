@@ -256,3 +256,46 @@ fn drop_rx() {
     assert_ok!(th1.join());
     assert_ok!(th2.join());
 }
+
+#[test]
+fn shared_receiver_receives_once() {
+    let (tx, rx) = barrage::unbounded();
+    let shared1 = rx.clone().into_shared();
+    let shared2 = shared1.clone();
+
+    tx.try_send("Hello!").unwrap();
+    assert_eq!(shared1.try_recv(), Ok(Some("Hello!")));
+    assert_eq!(shared2.try_recv(), Ok(None));
+    assert_eq!(rx.try_recv(), Ok(Some("Hello!")));
+}
+
+#[test]
+fn shared_receiver_same_mailbox() {
+    let (_, rx) = barrage::unbounded::<()>();
+    let shared_a_1 = rx.clone().into_shared();
+    let shared_a_2 = shared_a_1.clone();
+    let shared_b = rx.into_shared();
+
+    assert!(shared_a_1.same_mailbox(&shared_a_2));
+    assert!(!shared_a_1.same_mailbox(&shared_b));
+}
+
+#[test]
+fn shared_receiver_drop() {
+    let (tx, rx) = barrage::unbounded();
+    let shared1 = rx.into_shared();
+    let shared2 = shared1.clone();
+
+    tx.try_send("Hello!").unwrap();
+    assert_eq!(shared1.try_recv(), Ok(Some("Hello!")));
+    assert_eq!(shared2.try_recv(), Ok(None));
+
+    drop(shared2);
+
+    tx.try_send("Hello2!").unwrap();
+    assert_eq!(shared1.try_recv(), Ok(Some("Hello2!")));
+
+    drop(shared1);
+
+    assert!(tx.try_send("Hello3!").is_err());
+}

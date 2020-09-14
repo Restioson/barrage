@@ -166,27 +166,20 @@ impl<'a, T: Clone + Unpin> Future for SendFut<'a, T> {
 ///
 /// If receive is called twice on the same receiver, only one receive will receive the broadcast
 /// message. If both must receive it, clone the receiver.
-pub struct Receiver<T: Clone + Unpin> {
+pub struct Receiver<T: Clone + Unpin>(ReceiverInner<T>);
+
+struct ReceiverInner<T: Clone + Unpin> {
     shared: Arc<Shared<T>>,
     queue: Arc<ConcurrentQueue<Arc<T>>>,
 }
 
-impl<T: Clone + Unpin> Clone for Receiver<T> {
-    fn clone(&self) -> Self {
-        let queue = Arc::new(ConcurrentQueue::unbounded());
-        let mut receiver_queues = lock_write(&self.shared.receiver_queues);
-        receiver_queues.push(queue.clone());
-        self.shared.n_receivers.fetch_add(1, Ordering::Release);
-
-        Receiver {
-            shared: self.shared.clone(),
-            queue,
-        }
-    }
-}
-
-impl<T: Clone + Unpin> Drop for Receiver<T> {
+impl<T: Clone + Unpin> Drop for ReceiverInner<T> {
     fn drop(&mut self) {
+        // 2 because 1 in the receiver inner & 1 in the shared
+        if Arc::strong_count(&self.queue) > 2 {
+            return;
+        }
+
         let mut receiver_queues = lock_write(&self.shared.receiver_queues);
         receiver_queues.retain(|other| !Arc::ptr_eq(&self.queue, other));
 
@@ -198,10 +191,24 @@ impl<T: Clone + Unpin> Drop for Receiver<T> {
     }
 }
 
-impl<T: Clone + Unpin> Receiver<T> {
-    /// Receive a broadcast message. If there are none in the queue, it will block until another is
-    /// sent or all senders disconnect.
-    pub fn recv(&self) -> Result<T, Disconnected> {
+
+impl<T: Clone + Unpin> Clone for Receiver<T> {
+    fn clone(&self) -> Self {
+        let queue = Arc::new(ConcurrentQueue::unbounded());
+        let mut receiver_queues = lock_write(&self.0.shared.receiver_queues);
+        receiver_queues.push(queue.clone());
+        self.0.shared.n_receivers.fetch_add(1, Ordering::Release);
+        let inner = ReceiverInner {
+            shared: self.0.shared.clone(),
+            queue,
+        };
+
+        Receiver(inner)
+    }
+}
+
+impl<T: Clone + Unpin> ReceiverInner<T> {
+    fn recv(&self) -> Result<T, Disconnected> {
         loop {
             let listener = self.shared.on_send.listen();
             match self.try_recv() {
@@ -212,9 +219,7 @@ impl<T: Clone + Unpin> Receiver<T> {
         }
     }
 
-    /// Try to receive a broadcast message. If there are none in the queue, it will return `None`, or
-    /// if there are no senders it will return `Disconnected`.
-    pub fn try_recv(&self) -> Result<Option<T>, Disconnected> {
+    fn try_recv(&self) -> Result<Option<T>, Disconnected> {
         match self.queue.pop() {
             Ok(item) => {
                 if Arc::strong_count(&item) == 1 {
@@ -229,19 +234,83 @@ impl<T: Clone + Unpin> Receiver<T> {
         }
     }
 
-    /// Receive a broadcast message. If there are none in the queue, it will asynchronously wait
-    /// until another is sent or all senders disconnect.
-    pub fn recv_async(&self) -> RecvFut<T> {
+    fn recv_async(&self) -> RecvFut<T> {
         RecvFut {
-            receiver: self,
+            receiver: &self,
             event_listener: None,
         }
     }
 }
 
+impl<T: Clone + Unpin> Receiver<T> {
+    /// Receive a broadcast message. If there are none in the queue, it will block until another is
+    /// sent or all senders disconnect.
+    pub fn recv(&self) -> Result<T, Disconnected> {
+        self.0.recv()
+    }
+
+    /// Try to receive a broadcast message. If there are none in the queue, it will return `None`, or
+    /// if there are no senders it will return `Disconnected`.
+    pub fn try_recv(&self) -> Result<Option<T>, Disconnected> {
+        self.0.try_recv()
+    }
+
+    /// Receive a broadcast message. If there are none in the queue, it will asynchronously wait
+    /// until another is sent or all senders disconnect.
+    pub fn recv_async(&self) -> RecvFut<T> {
+        self.0.recv_async()
+    }
+
+    /// Converts this receiver into a [shared receiver](struct.SharedReceiver.html).
+    pub fn into_shared(self) -> SharedReceiver<T> {
+        SharedReceiver(self.0)
+    }
+}
+
+/// A shared receiver is similar to a receiver, but it shares a mailbox with the other shared
+/// receivers from which it originates (was cloned from). Thus, only one shared receiver with the
+/// same mailbox will receive a broadcast.
+pub struct SharedReceiver<T: Clone + Unpin>(ReceiverInner<T>);
+
+impl<T: Clone + Unpin> Clone for SharedReceiver<T> {
+    fn clone(&self) -> Self {
+        let inner = ReceiverInner {
+            shared: self.0.shared.clone(),
+            queue: self.0.queue.clone(),
+        };
+
+        SharedReceiver(inner)
+    }
+}
+
+impl<T: Clone + Unpin> SharedReceiver<T> {
+    /// Checks whether this shared receiver shares a mailbox with another.
+    pub fn same_mailbox(&self, other: &SharedReceiver<T>) -> bool {
+        Arc::ptr_eq(&self.0.queue, &other.0.queue)
+    }
+
+    /// Receive a broadcast message. If there are none in the queue, it will block until another is
+    /// sent or all senders disconnect.
+    pub fn recv(&self) -> Result<T, Disconnected> {
+        self.0.recv()
+    }
+
+    /// Try to receive a broadcast message. If there are none in the queue, it will return `None`, or
+    /// if there are no senders it will return `Disconnected`.
+    pub fn try_recv(&self) -> Result<Option<T>, Disconnected> {
+        self.0.try_recv()
+    }
+
+    /// Receive a broadcast message. If there are none in the queue, it will asynchronously wait
+    /// until another is sent or all senders disconnect.
+    pub fn recv_async(&self) -> RecvFut<T> {
+        self.0.recv_async()
+    }
+}
+
 /// The future representing an asynchronous receive operation.
 pub struct RecvFut<'a, T: Clone + Unpin> {
-    receiver: &'a Receiver<T>,
+    receiver: &'a ReceiverInner<T>,
     event_listener: Option<EventListener>,
 }
 
@@ -280,8 +349,12 @@ pub fn new<T: Clone + Unpin>(capacity: Option<usize>) -> (Sender<T>, Receiver<T>
         capacity,
     };
     let shared = Arc::new(shared);
+    let receiver_inner = ReceiverInner {
+        shared: shared.clone(),
+        queue: receiver_queue
+    };
 
-    (Sender(shared.clone()), Receiver { shared, queue: receiver_queue })
+    (Sender(shared), Receiver(receiver_inner))
 }
 
 /// Create a bounded channel of the given capacity.
