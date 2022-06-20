@@ -1,5 +1,3 @@
-#![cfg(not(loom))]
-
 use barrage::{Disconnected, SendError};
 use std::future::Future;
 use std::pin::Pin;

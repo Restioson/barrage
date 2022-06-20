@@ -21,8 +21,8 @@ use std::task::{Context, Poll};
 use concurrent_queue::ConcurrentQueue;
 use event_listener::{Event, EventListener};
 use std::fmt::Debug;
-use facade::sync::atomic::{AtomicUsize, Ordering};
-use facade::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use facade::*;
 
 mod facade;
