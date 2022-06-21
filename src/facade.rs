@@ -2,10 +2,10 @@
 // gates as mutually exclusive
 
 mod rwlock {
-    #[cfg(windows)]
-    pub use std::sync::*;
     #[cfg(not(windows))]
     pub use spin::rwlock::*;
+    #[cfg(windows)]
+    pub use std::sync::*;
 }
 
 pub type RwLock<T> = rwlock::RwLock<T>;
@@ -14,7 +14,8 @@ pub type ReadGuard<'a, T> = rwlock::RwLockReadGuard<'a, T>;
 
 #[cfg(not(windows))]
 pub fn wait_lock<'a, T, F, R>(lock: &'a RwLock<T>, try_lock: F) -> R
-    where F: Fn(&'a RwLock<T>) -> Option<R>
+where
+    F: Fn(&'a RwLock<T>) -> Option<R>,
 {
     #[allow(unused_variables)]
     let mut i = 4;

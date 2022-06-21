@@ -1,12 +1,12 @@
 use barrage::{Disconnected, SendError};
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
-use tokio::time::Duration;
-use std::sync::Arc;
-use std::thread;
-use tokio_test::assert_ok;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::thread;
+use tokio::time::Duration;
+use tokio_test::assert_ok;
 
 struct PollOnce<'a, F: Future + Unpin>(&'a mut F);
 

@@ -15,15 +15,15 @@
 //! assert_eq!(rx3.try_recv(), Ok(None));
 //! ```
 
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use concurrent_queue::ConcurrentQueue;
 use event_listener::{Event, EventListener};
+use facade::*;
 use std::fmt::Debug;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use facade::*;
+use std::task::{Context, Poll};
 
 mod facade;
 
@@ -80,7 +80,11 @@ impl<T: Clone + Unpin> Sender<T> {
         }
 
         let shared = &self.0;
-        if shared.capacity.map(|c| c == shared.len.load(Ordering::Acquire)).unwrap_or(false) {
+        if shared
+            .capacity
+            .map(|c| c == shared.len.load(Ordering::Acquire))
+            .unwrap_or(false)
+        {
             return Err(TrySendError::Full(item));
         }
 
@@ -155,7 +159,7 @@ impl<'a, T: Clone + Unpin> Future for SendFut<'a, T> {
                     self.event_listener = Some(listener);
                     Poll::Pending
                 }
-            }
+            };
         };
 
         poll
@@ -187,10 +191,11 @@ impl<T: Clone + Unpin> Drop for ReceiverInner<T> {
             return;
         }
 
-        self.shared.on_final_receive.notify(self.shared.n_senders.load(Ordering::Acquire));
+        self.shared
+            .on_final_receive
+            .notify(self.shared.n_senders.load(Ordering::Acquire));
     }
 }
-
 
 impl<T: Clone + Unpin> Clone for Receiver<T> {
     fn clone(&self) -> Self {
@@ -227,19 +232,23 @@ impl<T: Clone + Unpin> ReceiverInner<T> {
                 let inner = (&*item).clone();
                 drop(item);
 
-                if weak.strong_count() == 0 &&
-                    self.shared.len.compare_exchange(
-                        old_len,
-                        old_len - 1,
-                        Ordering::Release,
-                        Ordering::Relaxed
-                    ).is_ok()
+                if weak.strong_count() == 0
+                    && self
+                        .shared
+                        .len
+                        .compare_exchange(
+                            old_len,
+                            old_len - 1,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
                 {
                     self.shared.on_final_receive.notify_additional(1);
                 }
 
                 Ok(Some(inner))
-            },
+            }
             Err(_) if self.shared.n_senders.load(Ordering::Acquire) > 0 => Ok(None),
             Err(_) => Err(Disconnected),
         }
@@ -355,9 +364,9 @@ impl<'a, T: Clone + Unpin> Future for RecvFut<'a, T> {
                     }
                     self.event_listener = Some(listener);
                     Poll::Pending
-                },
+                }
                 Err(_) => Poll::Ready(Err(Disconnected)),
-            }
+            };
         }
     }
 }
@@ -378,7 +387,7 @@ pub fn new<T: Clone + Unpin>(capacity: Option<usize>) -> (Sender<T>, Receiver<T>
     let shared = Arc::new(shared);
     let receiver_inner = ReceiverInner {
         shared: shared.clone(),
-        queue: receiver_queue
+        queue: receiver_queue,
     };
 
     (Sender(shared), Receiver(receiver_inner))
