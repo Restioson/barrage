@@ -1,7 +1,7 @@
 [package]
 name = "barrage"
 description = "An async broadcast channel"
-version = "0.2.2"
+version = "0.2.3"
 authors = ["Restioson <restiosondev@gmail.com>"]
 edition = "2021"
 license = "Apache-2.0"

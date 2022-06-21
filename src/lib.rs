@@ -222,12 +222,23 @@ impl<T: Clone + Unpin> ReceiverInner<T> {
     fn try_recv(&self) -> Result<Option<T>, Disconnected> {
         match self.queue.pop() {
             Ok(item) => {
-                if Arc::strong_count(&item) == 1 {
-                    self.shared.len.fetch_sub(1, Ordering::Release);
+                let old_len = self.shared.len.load(Ordering::SeqCst);
+                let weak = Arc::downgrade(&item);
+                let inner = (&*item).clone();
+                drop(item);
+
+                if weak.strong_count() == 0 &&
+                    self.shared.len.compare_exchange(
+                        old_len,
+                        old_len - 1,
+                        Ordering::Release,
+                        Ordering::Relaxed
+                    ).is_ok()
+                {
                     self.shared.on_final_receive.notify_additional(1);
                 }
 
-                Ok(Some((&*item).clone()))
+                Ok(Some(inner))
             },
             Err(_) if self.shared.n_senders.load(Ordering::Acquire) > 0 => Ok(None),
             Err(_) => Err(Disconnected),
